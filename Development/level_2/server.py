@@ -5,73 +5,129 @@ import os
 import time
 import queue
 import threading
+import logging
+import json
 
-load_dotenv(".env-dev")
+# Initialize logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.FileHandler("server.log"),  # Save logs to a file
+        logging.StreamHandler(),  # Print logs to console
+    ],
+)
+
+load_dotenv("../../.env.local")
 
 app = Flask(__name__)
 
 api_key = os.getenv("ANTHROPIC_API_KEY")
 client = anthropic.Client(api_key=api_key)
 request_queue = queue.Queue()
-clients = []
+clients = {}  # Dictionary to store client ids and their output file paths
+
+client_outputs_dir = "client_outputs"
+if not os.path.exists(client_outputs_dir):
+    os.makedirs(client_outputs_dir)
+    logging.info(f"Created directory: {client_outputs_dir}")
 
 
-# call the LLM API with rate limiting
 def call_llm_api(prompt):
-    response = client.messages.create(
-        model="claude-3-5-sonnet-20240620",
-        max_tokens=1000,
-        temperature=0,
-        messages=[
-            {
-                "role": "user",
-                "content": [{"type": "text", "text": prompt}],
-            }
-        ],
-    )
-    return response.content[0].text
-
-
-# broadcast responses to all connected clients
-def broadcast_to_clients(prompt, response):
-    for client_socket in clients:
-        client_socket.send(
-            jsonify(
+    try:
+        logging.info(f"Sending request to LLM API with prompt: {prompt}")
+        response = client.messages.create(
+            model="claude-3-5-sonnet-20240620",
+            max_tokens=1000,
+            temperature=0,
+            messages=[
                 {
-                    "Prompt": prompt,
-                    "Message": response,
-                    "TimeSent": int(
-                        time.time()
-                    ),  # Assuming broadcast happens immediately
-                    "TimeReceived": int(time.time()),
-                    "Source": "Anthropic [Claude]",
+                    "role": "user",
+                    "content": [{"type": "text", "text": prompt}],
                 }
-            ).data.decode("utf-8")
+            ],
         )
+        response_text = response.content[0].text
+        logging.info(f"LLM API response: {response_text[0:10]}...")
+        return response_text
+    except Exception as e:
+        logging.error(f"Error calling LLM API: {e}")
+        return None  # Explicitly return None if there's an error
 
 
-# handle API calls with rate limiting
 def process_queue():
+    logging.info("Started processing queue.")
     while True:
         if not request_queue.empty():
             prompt_data = request_queue.get()
-            # Call the LLM API
-            response = call_llm_api(prompt_data["prompt"])
-            # Send response to all clients
-            broadcast_to_clients(prompt_data["prompt"], response)
+            logging.info(f"Dequeuing prompt data: {prompt_data}")
+
+            prompt = prompt_data.get("prompt")
+            client_id = prompt_data.get("client_id")
+            time_sent = prompt_data.get("time_sent", int(time.time()))
+
+            if not prompt:
+                logging.warning("Received prompt data without prompt content.")
+                continue
+
+            logging.info(f"Calling LLM API with prompt: {prompt}")
+            response = call_llm_api(prompt)
+
+            if response:
+                logging.info("Received response from LLM API")
+                message_data = {
+                    "Prompt": prompt,
+                    "Message": response,
+                    "TimeSent": time_sent,
+                    "TimeReceived": int(time.time()),
+                    "Source": "Claude",
+                    "ClientID": client_id,
+                }
+
+                # Write response to all clients' output files
+                for client_id, output_file in clients.items():
+                    try:
+                        # Read existing data
+                        if os.path.exists(output_file):
+                            with open(output_file, "r") as f:
+                                data = json.load(f)
+                        else:
+                            data = []
+
+                        # Append new response
+                        data.append(message_data)
+
+                        # Write updated data
+                        with open(output_file, "w") as f:
+                            json.dump(data, f, indent=4)
+
+                        logging.info(f"Response written to file for client {client_id}")
+                    except Exception as e:
+                        logging.error(
+                            f"Error writing to file for client {client_id}: {e}"
+                        )
+
+            else:
+                logging.error("No response received from LLM API")
+
             # Sleep to ensure we respect rate limits
-            time.sleep(12)  # e.g., waiting 12 seconds between calls
+            time.sleep(12)  # Adjust this as per the API's rate limits
 
 
 @app.route("/api/generate", methods=["POST"])
 def generate_response():
     data = request.json
-    prompt = data.get("prompt")  # type: ignore
-    client_id = data.get("client_id")  # type: ignore
+    prompt = data.get("prompt")
+    client_id = data.get("client_id")
 
     time_sent = int(time.time())
 
-    request_queue.put({"prompt": prompt, "client_id": client_id})
+    if client_id not in clients:
+        clients[client_id] = f"{client_outputs_dir}/{client_id}_output.json"
+
+    request_queue.put(
+        {"prompt": prompt, "client_id": client_id, "time_sent": time_sent}
+    )
 
     return jsonify(
         {
@@ -79,15 +135,6 @@ def generate_response():
             "TimeSent": time_sent,
         }
     )
-
-
-# WebSocket handler to manage client connections (for broadcasting)
-@app.route("/api/connect", methods=["POST"])
-def connect_client():
-    # Add a new client connection to the list
-    client_socket = request.environ.get("wsgi.input")
-    clients.append(client_socket)
-    return jsonify({"status": "Client connected"})
 
 
 if __name__ == "__main__":

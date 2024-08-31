@@ -1,5 +1,6 @@
 #!/bin/bash
-source .env-dev
+source ../../.env.local
+echo "CLIENT_IDS: $CLIENT_IDS" # Add this line for debugging
 # Start the Flask server in the background
 echo "Starting Flask server..."
 python server.py &

@@ -4,12 +4,13 @@ import os
 import time
 import json
 
-load_dotenv(".env-dev")
+load_dotenv("../../.env.local")
 
 api_key = os.getenv("ANTHROPIC_API_KEY")
+print(api_key)
 client = anthropic.Anthropic(api_key=api_key)
 
-with open("../input.txt", "r") as file:
+with open("../../input.txt", "r") as file:
     prompts = file.readlines()
     print(f"prompts: {prompts}")
 
